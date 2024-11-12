@@ -1,53 +1,60 @@
 const express = require('express');
 const cors = require('cors');
-
+const fs = require('fs');
+const dotenv = require('dotenv');
 const { createProxyMiddleware } = require('http-proxy-middleware');
 
-const app = express();
+dotenv.config();
 
+const app = express();
 app.use(cors({ origin: '*' }));
 
-// Target server URL (your actual HTTP target)
-const targetUrl = process.env['TARGET'];
+// Initial target server URL from .env
+let targetUrl = process.env['TARGET'];
+const PORT = process.env['PORT'] || 8080;
 
 if (!targetUrl) throw new Error('No target URL provided');
 
-// Proxy middleware to forward all requests, including paths and query strings
-app.use(
-  '/', // Forward all routes
+// Define the `/update-ddns` route specifically so it’s excluded from proxying
+app.get('/update-ddns', (req, res) => {
+  const clientIp = req.query.ip || req.headers['x-forwarded-for'] || req.connection.remoteAddress;
+
+  targetUrl = `http://${clientIp}`;
+
+  // Write changes to .env
+  fs.writeFileSync('.env', `TARGET=${targetUrl}\nPORT=${PORT}\n`);
+  dotenv.config();
+
+  console.log('Updated target URL to:', targetUrl);
+  res.send('OK');
+});
+
+// Dynamically create proxy middleware for each request
+app.use((req, res, next) => {
+  if (req.path === '/update-ddns') {
+    // Skip proxy for the `/update-ddns` route
+    return next();
+  }
+
+  // Create proxy middleware with the current `targetUrl`
   createProxyMiddleware({
     target: targetUrl,
-    changeOrigin: true,  // Modify the origin to match the target
-    secure: false,       // Set to false since the target is HTTP, not HTTPS
-
-    // Preserve the full original path and query string
-    pathRewrite: (path, req) => {
-      // Ensure the exact path and query string are sent to the target server
-      return path; // Keeps the original path unchanged
-    },
-
-    // Add headers for forwarding client information
+    changeOrigin: true,
+    secure: false,
+    pathRewrite: (path, req) => path, // Keeps the original path unchanged
     onProxyReq: (proxyReq, req, res) => {
       const clientIp = req.headers['x-forwarded-for'] || req.connection.remoteAddress;
       proxyReq.setHeader('X-Forwarded-For', clientIp);
-
-      // Forward original Host
       proxyReq.setHeader('Host', req.headers.host);
-
-      // Forward Origin header if available
       if (req.headers.origin) {
         proxyReq.setHeader('Origin', req.headers.origin);
       }
     },
-
-    preserveHeaderKeyCase: true, // Preserve the case of header keys
-  })
-);
-
-// Start the HTTP server
-const PORT = process.env['PORT'] || 8080;
+    preserveHeaderKeyCase: true,
+  })(req, res, next); // Call the middleware immediately
+});
 
 app.listen(PORT, () => {
-  console.log('Endpoint: ' + targetUrl);
+  console.log('Initial target URL:', targetUrl);
   console.log(`Proxy server running on http://localhost:${PORT}`);
 });
